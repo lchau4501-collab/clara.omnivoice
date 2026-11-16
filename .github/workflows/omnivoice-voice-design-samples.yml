@@ -115,12 +115,12 @@ jobs:
               (
                   "sample1.wav",
                   "At dawn, the quiet harbor slowly came to life.",
-                  "Male, middle-aged, warm low-mid voice with a calm, measured General American accent; clear, intimate audiobook narrator, natural and unhurried.",
+                  "male, middle-aged, low pitch, american accent",
               ),
               (
                   "sample2.wav",
                   "A small change in direction can open a new path.",
-                  "Male, young adult, bright resonant mid-range voice with a clear General American accent; engaging audiobook narrator, lightly energetic but relaxed.",
+                  "male, young adult, moderate pitch, american accent",
               ),
           ]
           with torch.inference_mode():
