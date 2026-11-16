@@ -1,0 +1,135 @@
+# ============================================================================
+# OmniVoice smoke test - non-commercial personal experiment
+#
+# Attribution and license notices:
+# - OmniVoice code: Apache License 2.0
+#   https://github.com/k2-fsa/OmniVoice
+# - OmniVoice pre-trained weights: CC-BY-NC (non-commercial use only), due to
+#   constraints from its training data (e.g., Emilia).
+#   https://huggingface.co/k2-fsa/OmniVoice
+#   This workflow downloads the weights from Hugging Face at run time for
+#   non-commercial personal experimentation. No weights are committed to or
+#   redistributed by this repository.
+# - Audio tokenizer (audio_tokenizer/): Boson Higgs Audio 2 Community License
+#   (based on the Meta Llama 3 Community License).
+#   "Built with Higgs Materials licensed from Boson AI USA, Inc., Copyright
+#   Boson AI USA, Inc., All Rights Reserved and Meta Llama 3 licensed under
+#   the Meta Llama 3 Community License, Copyright Meta Platforms, Inc.,
+#   All Right Reserved"
+#   https://huggingface.co/k2-fsa/OmniVoice/blob/main/audio_tokenizer/LICENSE
+# - Voice policy: this workflow only uses a self-generated voice-design sample
+#   (instruct="female, young adult, american accent") as the reference voice.
+#   No real person's voice is used or cloned.
+# ============================================================================
+
+name: omnivoice-smoke-test
+
+on:
+  workflow_dispatch:
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install torch==2.8.0 torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/cpu
+          pip install omnivoice==0.2.1 safetensors soundfile huggingface_hub
+
+      - name: Run tiny OmniVoice smoke test (few seconds of audio)
+        env:
+          HF_HOME: ${{ runner.temp }}/hf
+          OV_REVISION: c5fdb5ccb189668d56333f77ba2629f4cd7535f4
+        run: |
+          python - <<'PYEOF'
+          import os, time, resource, shutil
+          import torch
+          import soundfile as sf
+
+          t_start = time.perf_counter()
+          t_prev = t_start
+          def lap(name):
+              global t_prev
+              now = time.perf_counter()
+              print(f"TIMING {name}: {now - t_prev:.1f}s", flush=True)
+              t_prev = now
+
+          print("torch", torch.__version__, flush=True)
+          os.system("nproc; free -m | head -2")
+
+          from huggingface_hub import snapshot_download
+          snap = snapshot_download("k2-fsa/OmniVoice", revision=os.environ["OV_REVISION"])
+          lap("snapshot_download")
+
+          # Convert weights to fp16 tensor by tensor (keeps peak RSS low)
+          from safetensors import safe_open
+          from safetensors.torch import save_file
+          work = os.path.join(os.environ["HF_HOME"], "ov-fp16")
+          os.makedirs(work, exist_ok=True)
+          for entry in os.listdir(snap):
+              if entry == "model.safetensors":
+                  continue
+              src = os.path.join(snap, entry)
+              dst = os.path.join(work, entry)
+              if os.path.isdir(src):
+                  if not os.path.exists(dst):
+                      os.symlink(src, dst)
+              else:
+                  shutil.copy2(src, dst)
+          tensors = {}
+          with safe_open(os.path.join(snap, "model.safetensors"), framework="pt") as f:
+              for k in f.keys():
+                  t = f.get_tensor(k)
+                  if t.is_floating_point():
+                      t = t.to(torch.float16)
+                  tensors[k] = t
+          save_file(tensors, os.path.join(work, "model.safetensors"), metadata={"format": "pt"})
+          del tensors
+          lap("fp16_convert")
+
+          torch.set_num_threads(2)
+          torch.manual_seed(7)
+
+          from omnivoice import OmniVoice
+          model = OmniVoice.from_pretrained(work, device_map="cpu", dtype=torch.float16)
+          lap("model_load")
+
+          REF = "The quick brown fox jumps over the lazy dog."
+          TEST = "Hello from OmniVoice running on GitHub Actions."
+
+          with torch.inference_mode():
+              ref = model.generate(text=REF, language="English",
+                                   instruct="female, young adult, american accent")
+          lap("voice_design_gen")
+          sf.write("ref.wav", ref[0], model.sampling_rate)
+          print(f"AUDIO ref.wav duration: {len(ref[0]) / model.sampling_rate:.2f}s", flush=True)
+
+          with torch.inference_mode():
+              prompt = model.create_voice_clone_prompt(ref_audio="ref.wav", ref_text=REF)
+          lap("create_voice_clone_prompt")
+
+          with torch.inference_mode():
+              out = model.generate(text=TEST, language="English", voice_clone_prompt=prompt)
+          lap("clone_gen")
+          sf.write("out.wav", out[0], model.sampling_rate)
+          print(f"AUDIO out.wav duration: {len(out[0]) / model.sampling_rate:.2f}s", flush=True)
+
+          print(f"TIMING total: {time.perf_counter() - t_start:.1f}s", flush=True)
+          print(f"RSS_PEAK_MB: {resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024:.0f}", flush=True)
+          PYEOF
+
+      - name: Upload audio artifacts (auto-expire after 1 day)
+        uses: actions/upload-artifact@v4
+        with:
+          name: omnivoice-smoke-audio
+          path: |
+            ref.wav
+            out.wav
+          retention-days: 1
